@@ -1,0 +1,779 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Detector de Residuos</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+<style>
+:root{--bg:#0b1220;--panel:#0f172a;--muted:#64748b;--accent:#6366f1;--text:#e2e8f0;--card:#111827}
+*{box-sizing:border-box}html,body{height:100%}body{margin:0;background:linear-gradient(180deg,#0b1220,#0b1220 60%,#0e1629);color:var(--text);font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+.container{display:grid;grid-template-columns:1fr;gap:16px;padding:16px}
+@media(min-width:900px){.container{grid-template-columns:5fr 7fr;}}
+.card{background:rgba(17,24,39,.8);backdrop-filter:blur(8px);border:1px solid rgba(148,163,184,.15);border-radius:16px;box-shadow:0 10px 24px rgba(0,0,0,.4)}
+.card h2{margin:0 0 12px 0;font-size:18px}
+.section{padding:16px}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.btn{background:var(--accent);color:#fff;border:none;border-radius:12px;padding:10px 14px;font-weight:600;cursor:pointer}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.input{background:#0b1220;color:var(--text);border:1px solid rgba(148,163,184,.2);border-radius:12px;padding:10px}
+.slider{width:100%}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;background:#0b1220;border:1px solid rgba(148,163,184,.2);color:var(--muted);font-size:12px}
+.grid2{display:grid;grid-template-columns:1fr;gap:16px}
+@media(min-width:600px){.grid2{grid-template-columns:1fr 1fr}}
+.preview{display:flex;align-items:center;justify-content:center;min-height:280px;background:#0b1220;border-radius:12px;overflow:hidden;border:1px solid rgba(148,163,184,.2)}
+.table{width:100%;border-collapse:collapse;font-size:12px}
+.table th,.table td{padding:8px 10px;border-bottom:1px solid rgba(148,163,184,.15);text-align:left}
+.kbd{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;color:#a5b4fc}
+.toast{position:fixed;top:14px;right:14px;background:#111827;color:#e5e7eb;padding:10px 14px;border-radius:12px;border:1px solid rgba(148,163,184,.2);box-shadow:0 10px 24px rgba(0,0,0,.4);z-index:9999;opacity:0;transform:translateY(-10px);transition:all .2s}
+.toast.show{opacity:1;transform:translateY(0)}
+.hidden{display:none}
+small.mono{font-family:ui-monospace,Menlo,monospace;color:#9ca3af}
+
+/* Cambiado a una sola columna (vertical) */
+.viewerGrid{display:grid;grid-template-columns:1fr;gap:12px}
+
+/* Nuevos estilos para el panel de resumen */
+.summary-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 12px;
+  align-items: center;
+  font-weight: 600;
+  font-size: 14px;
+}
+.summary-color {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  border: 1px solid rgba(148,163,184,.2);
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="card">
+    <div class="section">
+      <h2>Controls</h2>
+      <div class="row">
+        <input id="file" class="input" type="file" accept=".jpg,.jpeg,.png,.mp4,.avi,.webm">
+        <button id="process" class="btn">Process</button>
+        <button id="downloadJson" class="btn" disabled>Download JSON</button>
+        <button id="downloadMedia" class="btn" disabled>Download Media</button>
+      </div>
+
+      <div class="row" style="margin-top:12px">
+        <input id="modelFile" class="input" type="file" accept=".onnx">
+        <button id="loadModelBtn" class="btn">Load model</button>
+        <small class="mono">If not set, tries 'best.onnx'</small>
+      </div>
+
+      <div class="grid2" style="margin-top:12px">
+        <div class="card section">
+          <div class="row">
+            <label style="width:120px">confidence</label>
+            <input id="conf" class="slider" type="range" min="0" max="1" step="0.01" value="0.25">
+            <span id="confv" class="badge">0.25</span>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <label style="width:120px">iou</label>
+            <input id="iou" class="slider" type="range" min="0" max="1" step="0.01" value="0.45">
+            <span id="iouv" class="badge">0.45</span>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <label class="badge"><input id="retOverlay" type="checkbox" checked> overlay</label>
+            <label class="badge"><input id="retJson" type="checkbox" checked> json</label>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <span class="badge">model: <span id="modelName">best.onnx</span></span>
+            <span class="badge">backend: <span id="backendName">-</span></span>
+          </div>
+        </div>
+        <div class="card section">
+          <div class="row">
+            <span class="badge">status: <span id="status">idle</span></span>
+            <span class="badge">progress: <span id="progress">0%</span></span>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <span class="badge">proc_ms: <span id="mProc">-</span></span>
+            <span class="badge">num_objects: <span id="mNum">-</span></span>
+            <span class="badge">file_type: <span id="mType">-</span></span>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top:12px" class="grid2">
+        <div class="card section">
+          <h2>Detections</h2>
+          <div style="max-height:280px;overflow:auto">
+            <table class="table" id="detTable">
+              <thead><tr><th>cls</th><th>conf</th><th>bbox_xyxy</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card section">
+          <h2>Logs</h2>
+          <pre id="logs" style="margin:0;white-space:pre-wrap;max-height:280px;overflow:auto;color:#a1a1aa"></pre>
+        </div>
+      </div>
+      
+      <div style="margin-top:12px">
+        <h2>Summary (by area)</h2>
+        <div class="card section">
+          <div class="summary-grid">
+            <span style="display:contents;"><span class="summary-color" style="background:#f97316;"></span>Trash:</span><span id="summary_trash">0%</span>
+            <span style="display:contents;"><span class="summary-color" style="background:#ef4444;"></span>Bottle:</span><span id="summary_bottle">0%</span>
+            <span style="display:contents;"><span class="summary-color" style="background:#22c55e;"></span>Plant:</span><span id="summary_plant">0%</span>
+            <span style="display:contents;"><span class="summary-color" style="background:#38bdf8;"></span>Water:</span><span id="summary_water">0%</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  <div class="card">
+    <div class="section">
+      
+      <h2>Viewer</h2>
+      <div class="viewerGrid">
+        <div id="previewOriginal" class="preview">
+          <div style="text-align:center;color:#94a3b8">
+            <div style="font-size:14px;margin-bottom:6px">Original image</div>
+            <div class="kbd">Drop here or use file picker</div>
+          </div>
+        </div>
+        <div id="previewProcessed" class="preview">
+          <div style="text-align:center;color:#94a3b8">
+            <div style="font-size:14px;margin-bottom:6px">Processed image</div>
+            <div class="kbd">Boxes and scores</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+  </div>
+
+<div id="toast" class="toast"></div>
+<canvas id="canvasProcessed" class="hidden"></canvas>
+<video id="video" class="hidden" playsinline></video>
+<img id="img" class="hidden" crossorigin="anonymous"/>
+
+<script>
+// --- INICIO DE CAMBIOS: CLASES Y COLORES ---
+const MODEL_URL_DEFAULT = "best.onnx"; 
+
+// ¡CAMBIO CLAVE! Este orden AHORA SÍ COINCIDE con tu data.yaml
+// 0: 'bottle', 1: 'trash', 2: 'water', 3: 'plant'
+const CLASS_NAMES = ["bottle", "trash", "water", "plant"]; 
+
+// Colores personalizados (estos no cambian, se basan en el nombre)
+const CLASS_COLORS = {
+  "plant": "#22c55e",    // Verde
+  "trash": "#f97316",    // Naranja
+  "bottle": "#ef4444",   // Rojo
+  "water": "#38bdf8",    // Azul claro
+  "default": "#60a5fa"  // Azul por defecto
+};
+// --- FIN DE CAMBIOS ---
+
+let session = null;
+let loadingModel = false;
+let inputSize = 640;
+let lastDetections = [];
+let recorder = null;
+let recordedChunks = [];
+let running = false;
+let fileType = null;
+let procStart = 0;
+let modelFileHandle = null;
+let inputName = "images";
+
+function toast(msg){
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  setTimeout(()=>t.classList.remove("show"),2300);
+}
+
+function log(m){
+  const el = document.getElementById("logs");
+  if(!el.textContent) el.textContent = m;
+  else el.textContent += "\n" + m;
+  el.scrollTop = el.scrollHeight;
+}
+
+function setStatus(s){document.getElementById("status").textContent = s;}
+function setProgress(p){document.getElementById("progress").textContent = p + "%";}
+function setMetrics(ms,objs,ft){
+  document.getElementById("mProc").textContent = ms;
+  document.getElementById("mNum").textContent = objs;
+  document.getElementById("mType").textContent = ft;
+}
+
+function sigmoid(x){return 1/(1+Math.exp(-x));}
+function iou(a,b){
+  const x1 = Math.max(a[0],b[0]);
+  const y1 = Math.max(a[1],b[1]);
+  const x2 = Math.min(a[2],b[2]);
+  const y2 = Math.min(a[3],b[3]);
+  const w = Math.max(0,x2-x1);
+  const h = Math.max(0,y2-y1);
+  const inter = w*h;
+  const ua = (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter;
+  return ua <= 0 ? 0 : inter/ua;
+}
+function nms(boxes,scores,iouTh){
+  const idx = boxes.map((_,i)=>i).sort((a,b)=>scores[b]-scores[a]);
+  const keep = [];
+  while(idx.length){
+    const i = idx.shift();
+    keep.push(i);
+    for(let j=idx.length-1;j>=0;--j){
+      if(iou(boxes[i],boxes[idx[j]])>iouTh) idx.splice(j,1);
+    }
+  }
+  return keep;
+}
+
+async function loadSession(force=false){
+  if(session && !force) return;
+  if(loadingModel) return;
+  loadingModel = true;
+  setStatus("loading");
+  log("loading model...");
+
+  try{
+    let options = {executionProviders:["wasm"]};
+    let sess = null;
+    if(modelFileHandle){
+      const buffer = await modelFileHandle.arrayBuffer();
+      const uint = new Uint8Array(buffer);
+      sess = await ort.InferenceSession.create(uint,options);
+      document.getElementById("modelName").textContent = modelFileHandle.name;
+      log("model ready from file");
+    }else{
+      sess = await ort.InferenceSession.create(MODEL_URL_DEFAULT,options);
+      document.getElementById("modelName").textContent = MODEL_URL_DEFAULT.split("/").pop();
+      log("model ready from url");
+    }
+    session = sess;
+    inputName = session.inputNames && session.inputNames[0] ? session.inputNames[0] : "images";
+    log("using input name: " + inputName);
+    document.getElementById("backendName").textContent = "wasm";
+    setStatus("ready");
+  }catch(e){
+    session = null;
+    setStatus("error");
+    log("model load error: " + (e && e.message ? e.message : String(e)));
+    toast("Could not load model. Select a .onnx file and press Load model.");
+  }finally{
+    loadingModel = false;
+  }
+}
+
+function letterbox(img,w,h){
+  const scale = Math.min(inputSize/w,inputSize/h);
+  const nw = Math.round(w*scale);
+  const nh = Math.round(h*scale);
+  const dx = Math.floor((inputSize-nw)/2);
+  const dy = Math.floor((inputSize-nh)/2);
+  const c = document.createElement("canvas");
+  c.width = inputSize;
+  c.height = inputSize;
+  const g = c.getContext("2d");
+  g.fillStyle = "#000";
+  g.fillRect(0,0,inputSize,inputSize);
+  g.drawImage(img,0,0,w,h,dx,dy,nw,nh);
+  return {canvas:c,scale,dx,dy};
+}
+
+function toTensor(canvas){
+  const g = canvas.getContext("2d");
+  const img = g.getImageData(0,0,inputSize,inputSize);
+  const data = img.data;
+  const size = inputSize*inputSize;
+  const arr = new Float32Array(3*size);
+  for(let i=0;i<size;i++){
+    const r = data[i*4]/255;
+    const g1 = data[i*4+1]/255;
+    const b = data[i*4+2]/255;
+    arr[i] = r;
+    arr[i+size] = g1;
+    arr[i+2*size] = b;
+  }
+  return new ort.Tensor("float32",arr,[1,3,inputSize,inputSize]);
+}
+
+// --- INICIO DE CAMBIOS: FUNCIÓN drawBoxes ---
+function drawBoxes(ctx,boxes,classes,scores){
+  ctx.lineWidth = 1; // Cajas más delgadas
+  ctx.font = "12px system-ui";
+  for(let i=0;i<boxes.length;i++){
+    const b = boxes[i];
+    const className = classes[i];
+    
+    // Obtener color del mapa de colores
+    const color = CLASS_COLORS[className] || CLASS_COLORS["default"];
+    
+    ctx.strokeStyle = color;
+    // Usa el color con transparencia (ej. '40' es ~25% de opacidad)
+    ctx.fillStyle = color + "40"; 
+
+    ctx.beginPath();
+    ctx.rect(b[0],b[1],b[2]-b[0],b[3]-b[1]);
+    ctx.fill();
+    ctx.stroke();
+    
+    const label = className + " " + (scores[i]*100).toFixed(1) + "%";
+    const w = ctx.measureText(label).width + 10;
+    const yLabel = Math.max(0,b[1]-18);
+    ctx.fillStyle = "#0b1220";
+    ctx.fillRect(b[0],yLabel,w,18);
+    ctx.fillStyle = "#e2e8f0";
+    ctx.fillText(label,b[0]+5,yLabel+13);
+  }
+}
+// --- FIN DE CAMBIOS: FUNCIÓN drawBoxes ---
+
+function buildJson(jobMs,ft,boxes,classes,scores,imgW,imgH){
+  const det = [];
+  for(let i=0;i<boxes.length;i++){
+    det.push({
+      cls: classes[i],
+      conf: scores[i],
+      bbox_xyxy: [
+        Math.round(boxes[i][0]),
+        Math.round(boxes[i][1]),
+        Math.round(boxes[i][2]),
+        Math.round(boxes[i][3])
+      ]
+    });
+  }
+  return {
+    job_id: (Math.random().toString(16).slice(2,14)),
+    model: document.getElementById("modelName").textContent || "unknown",
+    image_size: [imgW,imgH],
+    detections: det,
+    metrics: {proc_ms: jobMs,num_objects: det.length,file_type: ft}
+  };
+}
+
+function saveBlob(data,filename){
+  const url = URL.createObjectURL(data);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),500);
+}
+
+function updateTable(dets){
+  const tb = document.querySelector("#detTable tbody");
+  tb.innerHTML = "";
+  dets.forEach(d=>{
+    const tr = document.createElement("tr");
+    const td1 = document.createElement("td");
+    td1.textContent = d.cls;
+    const td2 = document.createElement("td");
+    td2.textContent = d.conf.toFixed(3);
+    const td3 = document.createElement("td");
+    td3.textContent = JSON.stringify(d.bbox_xyxy);
+    tr.appendChild(td1);
+    tr.appendChild(td2);
+    tr.appendChild(td3);
+    tb.appendChild(tr);
+  });
+}
+
+// --- INICIO DE NUEVAS FUNCIONES: updateSummary y resetSummary ---
+function resetSummary() {
+  document.getElementById('summary_trash').textContent = '0%';
+  document.getElementById('summary_bottle').textContent = '0%';
+  document.getElementById('summary_plant').textContent = '0%';
+  document.getElementById('summary_water').textContent = '0%';
+}
+
+function updateSummary(detections) {
+  // --- INICIO DE CAMBIOS: Sincronizar keys con CLASS_NAMES ---
+  // Las keys aquí DEBEN coincidir con los strings en CLASS_NAMES
+  let areas = { bottle: 0, trash: 0, water: 0, plant: 0 };
+  let totalArea = 0;
+
+  detections.forEach(d => {
+    const cls = d.cls; // ej: "bottle" (viene de CLASS_NAMES[0])
+    const b = d.bbox_xyxy;
+    const area = (b[2] - b[0]) * (b[3] - b[1]);
+    
+    if (areas.hasOwnProperty(cls)) {
+      areas[cls] += area;
+    }
+    totalArea += area;
+  });
+
+  if (totalArea === 0) {
+    resetSummary();
+    return;
+  }
+
+  // Calcular y mostrar porcentajes
+  Object.keys(areas).forEach(key => {
+    if (document.getElementById(`summary_${key}`)) {
+      const pct = (areas[key] / totalArea) * 100;
+      document.getElementById(`summary_${key}`).textContent = pct.toFixed(1) + '%';
+    }
+  });
+  // --- FIN DE CAMBIOS ---
+}
+// --- FIN DE NUEVAS FUNCIONES ---
+
+// ====================================================================
+// --- ¡INICIO DEL CAMBIO IMPORTANTE! ---
+// Esta es la función de decodificación CORRECTA para YOLOv8
+// ====================================================================
+function decodeDetections(raw,imgW,imgH,scale,dx,dy,confTh,iouTh){
+  const numC = CLASS_NAMES.length;
+  // La salida de YOLOv8 es [batch, 4 + numC, num_detections]
+  // Y los datos están "transpuestos" (transposed)
+  const numDetections = raw.length / (4 + numC);
+  
+  const boxes = [];
+  const scores = [];
+  const classes = [];
+
+  for (let i = 0; i < numDetections; i++) {
+    // Leemos los datos de la detección 'i'
+    // Las coordenadas (cx, cy, w, h) están en las primeras 4 posiciones
+    const cx = raw[i];
+    const cy = raw[i + numDetections];
+    const w = raw[i + 2 * numDetections];
+    const h = raw[i + 3 * numDetections];
+    
+    // Las puntuaciones de las clases empiezan desde la 4ª posición
+    let bestScore = 0;
+    let bestClass = -1;
+    for (let j = 0; j < numC; j++) {
+      const score = raw[i + (4 + j) * numDetections];
+      if (score > bestScore) {
+        bestScore = score;
+        bestClass = j;
+      }
+    }
+
+    if (bestScore < confTh) continue;
+
+    // Convertir de [cx, cy, w, h] a [x1, y1, x2, y2]
+    const x1i = cx - w / 2;
+    const y1i = cy - h / 2;
+    const x2i = cx + w / 2;
+    const y2i = cy + h / 2;
+
+    // Reescalar las coordenadas (quitar el "letterbox")
+    const rx1 = Math.max(0, (x1i - dx) / scale);
+    const ry1 = Math.max(0, (y1i - dy) / scale);
+    const rx2 = Math.min(imgW, (x2i - dx) / scale);
+    const ry2 = Math.min(imgH, (y2i - dy) / scale);
+
+    if (rx2 <= rx1 || ry2 <= ry1) continue;
+
+    boxes.push([rx1, ry1, rx2, ry2]);
+    scores.push(bestScore);
+    classes.push(CLASS_NAMES[bestClass]); // Traducir el índice (0) al nombre ("bottle")
+  }
+
+  // Aplicar Non-Maximum Suppression (NMS)
+  const keep = nms(boxes, scores, iouTh);
+  const fboxes = keep.map(i => boxes[i]);
+  const fclasses = keep.map(i => classes[i]);
+  const fscores = keep.map(i => scores[i]);
+
+  return { boxes: fboxes, classes: fclasses, scores: fscores };
+}
+// ====================================================================
+// --- ¡FIN DEL CAMBIO IMPORTANTE! ---
+// ====================================================================
+
+async function inferImage(imgEl){
+  await loadSession();
+  if(!session){toast("Model is not loaded.");return;}
+
+  running = true;
+  setStatus("running");
+  document.getElementById("downloadMedia").disabled = true;
+  document.getElementById("downloadJson").disabled = true;
+
+  const w = imgEl.naturalWidth;
+  const h = imgEl.naturalHeight;
+
+  const orig = document.getElementById("previewOriginal");
+  orig.innerHTML = "";
+  const origImg = document.createElement("img");
+  origImg.src = imgEl.src;
+  origImg.style.maxWidth = "100%";
+  origImg.style.maxHeight = "100%";
+  orig.appendChild(origImg);
+
+  const lb = letterbox(imgEl,w,h);
+  const tensor = toTensor(lb.canvas);
+
+  const feeds = {};
+  feeds[inputName] = tensor;
+
+  procStart = performance.now();
+  const out = await session.run(feeds);
+  const key = Object.keys(out)[0];
+  const raw = out[key].data;
+
+  const confTh = parseFloat(document.getElementById("conf").value);
+  const iouTh = parseFloat(document.getElementById("iou").value);
+
+  const decoded = decodeDetections(raw,w,h,lb.scale,lb.dx,lb.dy,confTh,iouTh);
+  const fboxes = decoded.boxes;
+  const fclasses = decoded.classes;
+  const fscores = decoded.scores;
+
+  const can = document.getElementById("canvasProcessed");
+  can.classList.remove("hidden");
+  can.width = w;
+  can.height = h;
+  const ctx = can.getContext("2d");
+  ctx.clearRect(0,0,w,h);
+  ctx.drawImage(imgEl,0,0);
+
+  if(document.getElementById("retOverlay").checked){
+    drawBoxes(ctx,fboxes,fclasses,fscores);
+  }
+
+  const procDiv = document.getElementById("previewProcessed");
+  procDiv.innerHTML = "";
+  procDiv.appendChild(can);
+
+  can.style.maxWidth = "100%";
+  can.style.maxHeight = "100%";
+
+  const ms = Math.round(performance.now() - procStart);
+  const jsonRes = buildJson(ms,"image",fboxes,fclasses,fscores,w,h);
+  lastDetections = jsonRes.detections;
+  
+  updateTable(lastDetections);
+  updateSummary(lastDetections); // <-- Aquí se actualizan los porcentajes
+
+  document.getElementById("downloadJson").onclick = ()=>{
+    const blob = new Blob([JSON.stringify(jsonRes,null,2)],{type:"application/json"});
+    saveBlob(blob, jsonRes.job_id + ".json");
+  };
+  document.getElementById("downloadMedia").onclick = ()=>{
+    can.toBlob(b=>saveBlob(b,"result.jpg"),"image/jpeg",0.92);
+  };
+
+  document.getElementById("downloadJson").disabled = !document.getElementById("retJson").checked;
+  document.getElementById("downloadMedia").disabled = !document.getElementById("retOverlay").checked;
+
+  running = false;
+  setStatus("done");
+  setProgress(100);
+  setMetrics(ms,lastDetections.length,"image");
+}
+
+async function inferVideo(file){
+  await loadSession();
+  if(!session){toast("Model is not loaded.");return;}
+
+  running = true;
+  setStatus("running");
+  document.getElementById("downloadMedia").disabled = true;
+  document.getElementById("downloadJson").disabled = true;
+
+  const url = URL.createObjectURL(file);
+  const vid = document.getElementById("video");
+  vid.classList.remove("hidden");
+  vid.controls = true;
+  vid.src = url;
+  await vid.play();
+
+  const w = vid.videoWidth;
+  const h = vid.videoHeight;
+
+  const orig = document.getElementById("previewOriginal");
+  orig.innerHTML = "";
+  orig.appendChild(vid);
+
+  const can = document.getElementById("canvasProcessed");
+  can.classList.remove("hidden");
+  can.width = w;
+  can.height = h;
+  const ctx = can.getContext("2d");
+  const procDiv = document.getElementById("previewProcessed");
+  procDiv.innerHTML = "";
+  procDiv.appendChild(can);
+
+  can.style.maxWidth = "100%";
+  can.style.maxHeight = "100%";
+
+  const lbC = document.createElement("canvas");
+  lbC.width = inputSize;
+  lbC.height = inputSize;
+  const lbCtx = lbC.getContext("2d");
+
+  const stream = can.captureStream();
+  recordedChunks = [];
+  recorder = new MediaRecorder(stream,{mimeType:"video/webm;codecs=vp9"});
+  recorder.ondataavailable = e=>{if(e.data.size>0) recordedChunks.push(e.data);};
+  recorder.onstop = ()=>{
+    const blob = new Blob(recordedChunks,{type:"video/webm"});
+    saveBlob(blob,"result.webm");
+  };
+  if(document.getElementById("retOverlay").checked){recorder.start();}
+
+  procStart = performance.now();
+  let stop = false;
+
+  const confTh = parseFloat(document.getElementById("conf").value);
+  const iouTh = parseFloat(document.getElementById("iou").value);
+
+  function step(){
+    if(vid.paused || vid.ended || stop){
+      if(recorder && recorder.state === "recording") recorder.stop();
+      URL.revokeObjectURL(url);
+      const ms = Math.round(performance.now() - procStart);
+      const jsonRes = buildJson(ms,"video",[],[],[],w,h);
+      document.getElementById("downloadJson").onclick = ()=>{
+        const blob = new Blob([JSON.stringify(jsonRes,null,2)],{type:"application/json"});
+        saveBlob(blob, jsonRes.job_id + ".json");
+      };
+      document.getElementById("downloadJson").disabled = !document.getElementById("retJson").checked;
+      document.getElementById("downloadMedia").disabled = false;
+      running = false;
+      setStatus("done");
+      setProgress(100);
+      setMetrics(ms,lastDetections.length,"video");
+      return;
+    }
+
+    const scale = Math.min(inputSize/w,inputSize/h);
+    const nw = Math.round(w*scale);
+    const nh = Math.round(h*scale);
+    const dx = Math.floor((inputSize-nw)/2);
+    const dy = Math.floor((inputSize-nh)/2);
+
+    lbCtx.fillStyle = "#000";
+    lbCtx.fillRect(0,0,inputSize,inputSize);
+    lbCtx.drawImage(vid,0,0,w,h,dx,dy,nw,nh);
+
+    const imgData = lbCtx.getImageData(0,0,inputSize,inputSize);
+    const data = imgData.data;
+    const size = inputSize*inputSize;
+    const arr = new Float32Array(3*size);
+    for(let i=0;i<size;i++){
+      const r = data[i*4]/255;
+      const g1 = data[i*4+1]/255;
+      const b = data[i*4+2]/255;
+      arr[i] = r;
+      arr[i+size] = g1;
+      arr[i+2*size] = b;
+    }
+    const tensor = new ort.Tensor("float32",arr,[1,3,inputSize,inputSize]);
+
+    const feeds = {};
+    feeds[inputName] = tensor;
+
+    session.run(feeds).then(out=>{
+      const key = Object.keys(out)[0];
+      const raw = out[key].data;
+
+      const decoded = decodeDetections(raw,w,h,scale,dx,dy,confTh,iouTh);
+      const fboxes = decoded.boxes;
+      const fclasses = decoded.classes;
+      const fscores = decoded.scores;
+
+      ctx.drawImage(vid,0,0,w,h);
+      if(document.getElementById("retOverlay").checked){
+        drawBoxes(ctx,fboxes,fclasses,fscores);
+      }
+
+      lastDetections = fboxes.map((b,idx)=>({
+        cls: fclasses[idx],
+        conf: fscores[idx],
+        bbox_xyxy: [
+          Math.round(b[0]),
+          Math.round(b[1]),
+          Math.round(b[2]),
+          Math.round(b[3])
+        ]
+      }));
+      updateTable(lastDetections);
+      updateSummary(lastDetections);
+      setProgress(Math.min(99,Math.round((vid.currentTime/vid.duration)*100)));
+      requestAnimationFrame(step);
+    }).catch(err=>{
+      log("video frame error: " + String(err));
+      stop = true;
+      requestAnimationFrame(step);
+    });
+  }
+  requestAnimationFrame(step);
+}
+
+async function handleProcess(){
+  if(running) return;
+  const f = document.getElementById("file").files[0];
+  if(!f){toast("choose a file");return;}
+  const ext = f.name.split(".").pop().toLowerCase();
+
+  resetSummary();
+
+  if(["jpg","jpeg","png"].includes(ext)){
+    fileType = "image";
+    const url = URL.createObjectURL(f);
+    const im = document.getElementById("img");
+    im.onload = ()=>{inferImage(im);};
+    im.src = url;
+  }else if(["mp4","avi","webm"].includes(ext)){
+    fileType = "video";
+    inferVideo(f);
+  }else{
+    toast("unsupported format");
+  }
+}
+
+function setupUI(){
+  document.getElementById("conf").addEventListener("input",e=>{
+    document.getElementById("confv").textContent = Number(e.target.value).toFixed(2);
+  });
+  document.getElementById("iou").addEventListener("input",e=>{
+    document.getElementById("iouv").textContent = Number(e.target.value).toFixed(2);
+  });
+  document.getElementById("process").addEventListener("click",handleProcess);
+
+  document.getElementById("loadModelBtn").addEventListener("click",()=>{
+    const f = document.getElementById("modelFile").files[0];
+    if(!f){toast("select a .onnx model first");return;}
+    modelFileHandle = f;
+    log("using model from file: " + f.name);
+    loadSession(true);
+  });
+
+  const drop = document.getElementById("previewOriginal");
+  drop.addEventListener("dragover",e=>{
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  });
+  drop.addEventListener("drop",e=>{
+    e.preventDefault();
+    if(!e.dataTransfer.files.length) return;
+    document.getElementById("file").files = e.dataTransfer.files;
+  });
+}
+
+setupUI();
+log("Ready. Loading default model 'best.onnx'...");
+setStatus("loading");
+loadSession(); // Carga el modelo por defecto al iniciar
+</script>
+</body>
+</html>
